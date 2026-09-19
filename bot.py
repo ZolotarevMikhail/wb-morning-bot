@@ -11,6 +11,7 @@ import telebot
 from dotenv import load_dotenv
 
 from wb_data import MSK, build_summary
+from ozon_data import build_ozon_summary
 
 load_dotenv()  # читает .env рядом с ботом — токены не попадают в код
 
@@ -59,7 +60,14 @@ def send_summary_to(chat_id):
         bot.send_message(chat_id, "Нет WB_TOKEN в .env — сводку собрать не могу.")
         return
     try:
-        _send(chat_id, build_summary(token))
+        text = build_summary(token)
+        # Ozon добавляем, только если ключи настроены; ошибка Ozon не роняет WB-сводку.
+        if os.getenv("OZON_CLIENT_ID") and os.getenv("OZON_API_KEY"):
+            try:
+                text += "\n\n" + build_ozon_summary(os.getenv("OZON_CLIENT_ID"), os.getenv("OZON_API_KEY"))
+            except Exception as e:
+                text += f"\n\n⚠️ Ozon-блок не получен: {e}"
+        _send(chat_id, text)
     except Exception as e:
         bot.send_message(chat_id, f"Не получилось собрать сводку: {e}")
 
@@ -90,12 +98,19 @@ def cmd_start(message):
     subs = load_subs()
     subs.add(message.chat.id)
     save_subs(subs)
+    ozon_on = bool(os.getenv("OZON_CLIENT_ID") and os.getenv("OZON_API_KEY"))
     text = (
-        "Привет! Я бот «Утренняя сводка WB».\n\n"
+        "Здравствуйте! Я бот «Утренняя сводка».\n\n"
         f"Ты подписан: каждый день в {MORNING_HOUR}:00 МСК пришлю сводку по кабинету "
-        "Wildberries — продажи, заказы, заканчивающиеся товары.\n\n"
-        "Команды:\n"
-        "/summary — сводка прямо сейчас\n"
+        "Wildberries — продажи, заказы, заканчивающиеся товары."
+        + (
+            " Ozon тоже подключён — сводка придёт сразу по обеим площадкам.\n"
+            if ozon_on
+            else " (Ozon не подключён: добавь OZON_CLIENT_ID и OZON_API_KEY в .env, если нужен.)\n"
+        )
+        + "\nКоманды:\n"
+        "/summary — сводка по WB и Ozon прямо сейчас\n"
+        "/ozon — только Ozon\n"
         "/stop — отписаться от утренних сводок\n"
         "/help — что я умею"
     )
@@ -114,8 +129,9 @@ def cmd_stop(message):
 def cmd_help(message):
     bot.reply_to(
         message,
-        "Я присылаю сводку продаж и остатков Wildberries.\n"
+        "Я присылаю сводку продаж и остатков Wildberries (+ Ozon, если настроен).\n"
         "/summary — сводка сейчас\n"
+        "/ozon — только Ozon\n"
         "/start — подписаться на сводку в 10:00 МСК\n"
         "/stop — отписаться",
     )
@@ -130,11 +146,37 @@ def cmd_summary(message):
         return
     bot.send_chat_action(message.chat.id, "typing")
     try:
-        _send(None, build_summary(token), reply=message)
-    except RuntimeError as e:      # наша осмысленная ошибка (лимиты WB)
+        text = build_summary(token)
+        if os.getenv("OZON_CLIENT_ID") and os.getenv("OZON_API_KEY"):
+            try:
+                text += "\n\n" + build_ozon_summary(os.getenv("OZON_CLIENT_ID"), os.getenv("OZON_API_KEY"))
+            except Exception as e:
+                text += f"\n\n⚠️ Ozon-блок не получен: {e}"
+        _send(None, text, reply=message)
+    except RuntimeError as e:      # наша осмысленная ошибка (лимиты API)
         bot.reply_to(message, str(e))
     except Exception as e:         # всё остальное — покажем коротко
-        bot.reply_to(message, f"Не получилось получить данные WB: {e}")
+        bot.reply_to(message, f"Не получилось получить данные: {e}")
+
+
+@bot.message_handler(commands=["ozon"])
+def cmd_ozon(message):
+    client_id = os.getenv("OZON_CLIENT_ID")
+    api_key = os.getenv("OZON_API_KEY")
+    if not client_id or not api_key:
+        bot.reply_to(
+            message,
+            "Ozon не подключён: добавь в .env две строки — OZON_CLIENT_ID=... и OZON_API_KEY=... "
+            "(кабинет Ozon → Настройки → API-ключи) — и перезапусти бота.",
+        )
+        return
+    bot.send_chat_action(message.chat.id, "typing")
+    try:
+        _send(None, build_ozon_summary(client_id, api_key), reply=message)
+    except RuntimeError as e:
+        bot.reply_to(message, str(e))
+    except Exception as e:
+        bot.reply_to(message, f"Не получилось получить данные Ozon: {e}")
 
 
 if __name__ == "__main__":
